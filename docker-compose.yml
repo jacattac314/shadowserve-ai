@@ -1,0 +1,93 @@
+version: "3.9"
+
+services:
+  # ── Mock model servers ────────────────────────────────────────────────────
+  production-model:
+    build: .
+    command: python -m shadowserve.serving.mock_models production 8001
+    ports:
+      - "8001:8001"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 10s
+      retries: 3
+
+  challenger-model:
+    build: .
+    command: python -m shadowserve.serving.mock_models challenger 8002
+    ports:
+      - "8002:8002"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"]
+      interval: 10s
+      retries: 3
+
+  # ── PostgreSQL audit ledger ───────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: shadowserve
+      POSTGRES_PASSWORD: shadowserve
+      POSTGRES_DB: shadowserve
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shadowserve"]
+      interval: 5s
+      retries: 5
+
+  # ── Redis ─────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 3
+
+  # ── ShadowServe Gateway ───────────────────────────────────────────────────
+  shadowserve:
+    build: .
+    command: uvicorn shadowserve.main:app --host 0.0.0.0 --port 8000 --workers 1
+    ports:
+      - "8000:8000"
+    environment:
+      SHADOWSERVE_PRODUCTION_MODEL_URL: http://production-model:8001
+      SHADOWSERVE_CHALLENGER_MODEL_URL: http://challenger-model:8002
+      SHADOWSERVE_DATABASE_URL: postgresql+asyncpg://shadowserve:shadowserve@postgres:5432/shadowserve
+      SHADOWSERVE_REDIS_URL: redis://redis:6379/0
+      SHADOWSERVE_CANARY_WEIGHT: "0.10"
+      SHADOWSERVE_SHADOW_ENABLED: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      production-model:
+        condition: service_healthy
+      challenger-model:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      retries: 5
+
+  # ── Prometheus ────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.51.2
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=7d"
+
+volumes:
+  pgdata:

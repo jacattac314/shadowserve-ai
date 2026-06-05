@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ShadowServe AI — Control Plane</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --border: #30363d;
+    --accent: #58a6ff; --warn: #f0883e; --danger: #f85149;
+    --ok: #3fb950; --text: #c9d1d9; --muted: #8b949e;
+    --font: 'Segoe UI', system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: var(--font); font-size: 14px; }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 24px; border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  header h1 { font-size: 18px; color: var(--accent); letter-spacing: 0.5px; }
+  header .tag { font-size: 11px; color: var(--muted); background: var(--bg);
+    border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px; }
+  .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; padding: 20px 24px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+  .card h3 { font-size: 11px; text-transform: uppercase; color: var(--muted); letter-spacing: 0.8px; margin-bottom: 8px; }
+  .kpi { font-size: 28px; font-weight: 700; color: var(--accent); }
+  .kpi.warn { color: var(--warn); }
+  .kpi.danger { color: var(--danger); }
+  .kpi.ok { color: var(--ok); }
+  .sub { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .wide { grid-column: span 2; }
+  .full { grid-column: span 4; }
+  canvas { max-height: 200px; }
+  .drift-banner {
+    display: none; background: #3d1a1a; border: 1px solid var(--danger);
+    border-radius: 6px; padding: 12px 20px; margin: 0 24px;
+    color: var(--danger); font-weight: 600; font-size: 13px;
+  }
+  .drift-banner.visible { display: block; }
+  .audit-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .audit-table th { color: var(--muted); text-align: left; padding: 6px 10px;
+    border-bottom: 1px solid var(--border); }
+  .audit-table td { padding: 6px 10px; border-bottom: 1px solid #21262d; font-family: monospace; }
+  .badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px; }
+  .badge.production { background: #1f3b1f; color: var(--ok); }
+  .badge.canary { background: #2d2b1f; color: var(--warn); }
+  .badge.shadow { background: #1f2a3b; color: var(--accent); }
+  .canary-ctrl { display: flex; align-items: center; gap: 12px; padding: 12px 24px; }
+  .canary-ctrl label { color: var(--muted); font-size: 12px; }
+  input[type=range] { flex: 1; accent-color: var(--accent); }
+  .canary-val { font-size: 18px; font-weight: 700; color: var(--accent); min-width: 40px; }
+  button.apply {
+    background: var(--accent); color: var(--bg); border: none; border-radius: 4px;
+    padding: 6px 14px; font-weight: 600; cursor: pointer; font-size: 13px;
+  }
+  button.apply:hover { opacity: 0.85; }
+  .audit-search { display: flex; gap: 8px; padding: 0 0 12px 0; }
+  .audit-search input {
+    flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    border-radius: 4px; padding: 6px 10px; font-size: 12px; font-family: monospace;
+  }
+  .audit-search button { background: var(--surface); border: 1px solid var(--border);
+    color: var(--text); border-radius: 4px; padding: 6px 14px; cursor: pointer; font-size: 12px; }
+  .audit-detail { background: var(--bg); border: 1px solid var(--border);
+    border-radius: 4px; padding: 12px; font-family: monospace; font-size: 11px;
+    white-space: pre-wrap; max-height: 200px; overflow-y: auto; display: none; }
+  .audit-detail.visible { display: block; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>&#9670; ShadowServe AI — Control Plane</h1>
+  <div style="display:flex;gap:8px;align-items:center">
+    <span class="tag">SR 11-7 Compliant</span>
+    <span class="tag" id="status-badge">Connecting...</span>
+  </div>
+</header>
+
+<div class="drift-banner" id="drift-banner">
+  ⚠ DRIFT DETECTED — Challenger distribution has diverged from production. Auto-rollback in effect.
+</div>
+
+<!-- KPI row -->
+<div class="grid">
+  <div class="card">
+    <h3>Requests (total)</h3>
+    <div class="kpi" id="kpi-requests">—</div>
+    <div class="sub">since startup</div>
+  </div>
+  <div class="card">
+    <h3>KS Statistic</h3>
+    <div class="kpi" id="kpi-ks">—</div>
+    <div class="sub" id="sub-ks">p-value: —</div>
+  </div>
+  <div class="card">
+    <h3>PSI Score</h3>
+    <div class="kpi" id="kpi-psi">—</div>
+    <div class="sub">threshold: 0.20</div>
+  </div>
+  <div class="card">
+    <h3>Wasserstein Distance</h3>
+    <div class="kpi" id="kpi-w">—</div>
+    <div class="sub" id="sub-kl">KL divergence: —</div>
+  </div>
+</div>
+
+<!-- Canary control -->
+<div class="grid" style="padding-top:0">
+  <div class="card wide">
+    <h3>Canary Traffic Weight</h3>
+    <div class="canary-ctrl" style="padding:8px 0 0 0">
+      <label>0%</label>
+      <input type="range" id="canary-slider" min="0" max="100" value="10" />
+      <label>100%</label>
+      <div class="canary-val" id="canary-display">10%</div>
+      <button class="apply" onclick="applyCanary()">Apply</button>
+    </div>
+    <div class="sub" style="margin-top:8px">Live traffic fraction sent to challenger model (synchronous path)</div>
+  </div>
+
+  <div class="card wide">
+    <h3>Model Versions</h3>
+    <div style="display:flex;gap:24px;margin-top:8px">
+      <div>
+        <div style="font-size:11px;color:var(--muted)">Production</div>
+        <div style="font-size:16px;font-weight:700;color:var(--ok)" id="prod-ver">—</div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--muted)">Challenger</div>
+        <div style="font-size:16px;font-weight:700;color:var(--warn)" id="chal-ver">—</div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--muted)">Shadow</div>
+        <div style="font-size:16px;font-weight:700;color:var(--accent)" id="shadow-status">—</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Charts -->
+<div class="grid" style="padding-top:0">
+  <div class="card wide">
+    <h3>Drift Scores Over Time</h3>
+    <canvas id="drift-chart"></canvas>
+  </div>
+  <div class="card wide">
+    <h3>Request Distribution by Route</h3>
+    <canvas id="route-chart"></canvas>
+  </div>
+</div>
+
+<!-- Audit -->
+<div class="grid" style="padding-top:0">
+  <div class="card full">
+    <h3>Compliance Audit Ledger</h3>
+    <div class="audit-search">
+      <input type="text" id="tx-input" placeholder="Enter transaction_id for full lineage trace..." />
+      <button onclick="auditLookup()">Lookup</button>
+    </div>
+    <div class="audit-detail" id="audit-detail"></div>
+    <table class="audit-table">
+      <thead>
+        <tr>
+          <th>Transaction ID</th>
+          <th>Timestamp</th>
+          <th>Model</th>
+          <th>Route</th>
+          <th>Probability</th>
+          <th>Latency</th>
+        </tr>
+      </thead>
+      <tbody id="audit-body"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const driftHistory = { ks: [], psi: [], kl: [], labels: [] };
+const routeCounts = { production: 0, canary: 0, shadow: 0 };
+let totalRequests = 0;
+
+const driftCtx = document.getElementById('drift-chart').getContext('2d');
+const driftChart = new Chart(driftCtx, {
+  type: 'line',
+  data: {
+    labels: driftHistory.labels,
+    datasets: [
+      { label: 'KS Statistic', data: driftHistory.ks, borderColor: '#58a6ff', tension: 0.4, pointRadius: 2 },
+      { label: 'PSI (÷10)', data: driftHistory.psi, borderColor: '#f0883e', tension: 0.4, pointRadius: 2 },
+      { label: 'KL Divergence', data: driftHistory.kl, borderColor: '#bc8cff', tension: 0.4, pointRadius: 2 },
+    ]
+  },
+  options: {
+    animation: false, responsive: true, maintainAspectRatio: false,
+    scales: {
+      x: { ticks: { color: '#8b949e', maxTicksLimit: 8 }, grid: { color: '#21262d' } },
+      y: { ticks: { color: '#8b949e' }, grid: { color: '#21262d' }, min: 0 }
+    },
+    plugins: { legend: { labels: { color: '#c9d1d9', font: { size: 11 } } } }
+  }
+});
+
+const routeCtx = document.getElementById('route-chart').getContext('2d');
+const routeChart = new Chart(routeCtx, {
+  type: 'doughnut',
+  data: {
+    labels: ['Production', 'Canary', 'Shadow'],
+    datasets: [{ data: [0, 0, 0], backgroundColor: ['#3fb950', '#f0883e', '#58a6ff'] }]
+  },
+  options: {
+    responsive: true, maintainAspectRatio: false,
+    plugins: { legend: { labels: { color: '#c9d1d9', font: { size: 11 } } } }
+  }
+});
+
+function setKpi(id, val, cls) {
+  const el = document.getElementById(id);
+  el.textContent = val;
+  el.className = 'kpi' + (cls ? ' ' + cls : '');
+}
+
+async function fetchDrift() {
+  try {
+    const r = await fetch('/dashboard/api/drift');
+    const d = await r.json();
+    const ks = d.ks_statistic.toFixed(4);
+    const psi = d.psi_score.toFixed(4);
+    const kl = d.kl_divergence.toFixed(4);
+    const w = d.wasserstein_distance.toFixed(4);
+    setKpi('kpi-ks', ks, d.drift_detected ? 'danger' : '');
+    setKpi('kpi-psi', psi, d.psi_score > 0.20 ? 'danger' : d.psi_score > 0.10 ? 'warn' : 'ok');
+    setKpi('kpi-w', w, '');
+    document.getElementById('sub-ks').textContent = `p-value: ${d.ks_pvalue.toFixed(4)}`;
+    document.getElementById('sub-kl').textContent = `KL divergence: ${kl}`;
+    const banner = document.getElementById('drift-banner');
+    banner.className = 'drift-banner' + (d.drift_detected ? ' visible' : '');
+    const now = new Date().toLocaleTimeString();
+    driftHistory.labels.push(now);
+    driftHistory.ks.push(d.ks_statistic);
+    driftHistory.psi.push(d.psi_score / 10);
+    driftHistory.kl.push(d.kl_divergence);
+    if (driftHistory.labels.length > 30) {
+      driftHistory.labels.shift(); driftHistory.ks.shift();
+      driftHistory.psi.shift(); driftHistory.kl.shift();
+    }
+    driftChart.update();
+  } catch(e) {}
+}
+
+async function fetchCanary() {
+  try {
+    const r = await fetch('/dashboard/api/canary');
+    const d = await r.json();
+    document.getElementById('canary-slider').value = Math.round(d.canary_weight * 100);
+    document.getElementById('canary-display').textContent = Math.round(d.canary_weight * 100) + '%';
+    document.getElementById('prod-ver').textContent = d.production_model;
+    document.getElementById('chal-ver').textContent = d.challenger_model;
+    document.getElementById('shadow-status').textContent = d.shadow_enabled ? 'Active' : 'Off';
+    document.getElementById('status-badge').textContent = '● Live';
+    document.getElementById('status-badge').style.color = '#3fb950';
+  } catch(e) {}
+}
+
+async function fetchAudit() {
+  try {
+    const r = await fetch('/dashboard/api/audit/recent?limit=20');
+    const rows = await r.json();
+    totalRequests = rows.length;
+    setKpi('kpi-requests', rows.length, '');
+    const tbody = document.getElementById('audit-body');
+    tbody.innerHTML = rows.slice(0, 15).map(row => `
+      <tr>
+        <td style="color:var(--accent)">${row.transaction_id.slice(0,8)}…</td>
+        <td>${new Date(row.timestamp).toLocaleTimeString()}</td>
+        <td>${row.model_version}</td>
+        <td><span class="badge ${row.routed_to}">${row.routed_to}</span></td>
+        <td>${row.probability !== null ? row.probability.toFixed(4) : '—'}</td>
+        <td>${row.latency_ms.toFixed(1)} ms</td>
+      </tr>
+    `).join('');
+    const counts = { production: 0, canary: 0, shadow: 0 };
+    rows.forEach(r => { if (counts[r.routed_to] !== undefined) counts[r.routed_to]++; });
+    routeChart.data.datasets[0].data = [counts.production, counts.canary, counts.shadow];
+    routeChart.update();
+  } catch(e) {}
+}
+
+async function auditLookup() {
+  const tx = document.getElementById('tx-input').value.trim();
+  if (!tx) return;
+  const detail = document.getElementById('audit-detail');
+  try {
+    const r = await fetch(`/dashboard/api/audit/${tx}`);
+    if (!r.ok) { detail.textContent = 'Transaction not found.'; detail.className = 'audit-detail visible'; return; }
+    const d = await r.json();
+    detail.textContent = JSON.stringify(d, null, 2);
+    detail.className = 'audit-detail visible';
+  } catch(e) { detail.textContent = 'Error fetching audit entry.'; detail.className = 'audit-detail visible'; }
+}
+
+document.getElementById('canary-slider').addEventListener('input', function() {
+  document.getElementById('canary-display').textContent = this.value + '%';
+});
+
+async function applyCanary() {
+  const w = document.getElementById('canary-slider').value / 100;
+  await fetch(`/dashboard/api/canary/weight?weight=${w}`, { method: 'POST' });
+  fetchCanary();
+}
+
+async function tick() {
+  await Promise.all([fetchDrift(), fetchAudit()]);
+}
+
+fetchCanary();
+tick();
+setInterval(tick, 2000);
+setInterval(fetchCanary, 10000);
+</script>
+</body>
+</html>
