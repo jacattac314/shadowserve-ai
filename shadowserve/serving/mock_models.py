@@ -62,17 +62,45 @@ def make_challenger_app() -> FastAPI:
     return app
 
 
+_FEATURE_SCALES = {
+    "credit_score":     (300.0, 850.0),
+    "debt_to_income":   (0.0, 1.0),
+    "annual_income":    (10_000.0, 600_000.0),
+    "loan_amount":      (1_000.0, 300_000.0),
+    "employment_years": (0.0, 40.0),
+    "num_accounts":     (0.0, 30.0),
+    "num_derogatory":   (0.0, 10.0),
+}
+
+
+def _normalize(features: dict) -> np.ndarray:
+    """Min-max normalize known features to [0, 1]; pass unknowns through clipped."""
+    vals = []
+    for k, v in features.items():
+        if not isinstance(v, (int, float)):
+            continue
+        if k in _FEATURE_SCALES:
+            lo, hi = _FEATURE_SCALES[k]
+            vals.append((float(v) - lo) / (hi - lo))
+        else:
+            vals.append(float(v))
+    return np.clip(vals, 0.0, 1.0) if vals else np.array([0.5])
+
+
 def _logistic_score(features: dict, bias: float = 0.0) -> float:
-    """Deterministic-ish logistic score from feature dict."""
-    raw = sum(float(v) for v in features.values() if isinstance(v, (int, float)))
-    z = (raw * 0.15) + bias + random.gauss(0, 0.05)
+    """Logistic score on normalized features — credit-positive weighting."""
+    normed = _normalize(features)
+    # weights: credit_score(+), dti(-), income(+), loan(-), tenure(+), accounts(~), derogs(-)
+    weights = np.array([2.5, -1.5, 1.0, -0.8, 0.6, 0.2, -1.2])[:len(normed)]
+    z = float(np.dot(normed, weights)) + bias + random.gauss(0, 0.12) - 0.5
     return float(1 / (1 + np.exp(-z)))
 
 
 def _gbm_score(features: dict, bias: float = 0.0) -> float:
-    """Slightly more aggressive scorer mimicking gradient boosting."""
-    raw = sum(float(v) for v in features.values() if isinstance(v, (int, float)))
-    z = (raw * 0.18) + bias + random.gauss(0, 0.06)
+    """Challenger scorer — slightly more aggressive on DTI and derogatory marks."""
+    normed = _normalize(features)
+    weights = np.array([2.2, -2.0, 0.9, -1.0, 0.7, 0.15, -1.6])[:len(normed)]
+    z = float(np.dot(normed, weights)) + bias + random.gauss(0, 0.15) - 0.5
     return float(1 / (1 + np.exp(-z)))
 
 

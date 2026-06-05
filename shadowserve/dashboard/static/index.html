@@ -67,6 +67,61 @@
     border-radius: 4px; padding: 12px; font-family: monospace; font-size: 11px;
     white-space: pre-wrap; max-height: 200px; overflow-y: auto; display: none; }
   .audit-detail.visible { display: block; }
+
+  /* Executive Summary */
+  .exec-summary {
+    margin: 16px 24px 0;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .exec-summary-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 18px;
+    border-bottom: 1px solid var(--border);
+    background: #1c2128;
+  }
+  .exec-summary-header span { font-size: 11px; text-transform: uppercase;
+    letter-spacing: 0.8px; color: var(--muted); }
+  .exec-summary-header .overall-status {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 13px; font-weight: 700;
+  }
+  .status-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .status-dot.green  { background: var(--ok);     box-shadow: 0 0 6px var(--ok); }
+  .status-dot.yellow { background: var(--warn);   box-shadow: 0 0 6px var(--warn); }
+  .status-dot.red    { background: var(--danger);  box-shadow: 0 0 6px var(--danger); }
+  .exec-body { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0; }
+  .exec-section {
+    padding: 16px 18px;
+    border-right: 1px solid var(--border);
+  }
+  .exec-section:last-child { border-right: none; }
+  .exec-section h4 {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px;
+    color: var(--muted); margin-bottom: 10px;
+  }
+  .exec-finding {
+    display: flex; align-items: flex-start; gap: 8px;
+    margin-bottom: 8px; font-size: 13px; line-height: 1.45;
+  }
+  .exec-finding .dot {
+    width: 7px; height: 7px; border-radius: 50%; margin-top: 5px; flex-shrink: 0;
+  }
+  .exec-finding .dot.red    { background: var(--danger); }
+  .exec-finding .dot.yellow { background: var(--warn); }
+  .exec-finding .dot.green  { background: var(--ok); }
+  .exec-finding .dot.blue   { background: var(--accent); }
+  .exec-recommendation {
+    margin: 0 18px 14px;
+    padding: 10px 14px;
+    background: #1c2128;
+    border-left: 3px solid var(--accent);
+    border-radius: 0 4px 4px 0;
+    font-size: 13px; line-height: 1.5; color: var(--text);
+  }
+  .exec-recommendation strong { color: var(--accent); }
 </style>
 </head>
 <body>
@@ -81,6 +136,32 @@
 
 <div class="drift-banner" id="drift-banner">
   ⚠ DRIFT DETECTED — Challenger distribution has diverged from production. Auto-rollback in effect.
+</div>
+
+<!-- Executive Summary -->
+<div class="exec-summary">
+  <div class="exec-summary-header">
+    <span>Executive Summary</span>
+    <div class="overall-status">
+      <div class="status-dot" id="overall-dot"></div>
+      <span id="overall-label">Loading...</span>
+    </div>
+  </div>
+  <div class="exec-body">
+    <div class="exec-section">
+      <h4>Model Health</h4>
+      <div id="exec-model-findings"></div>
+    </div>
+    <div class="exec-section">
+      <h4>Data Stability</h4>
+      <div id="exec-drift-findings"></div>
+    </div>
+    <div class="exec-section">
+      <h4>Performance</h4>
+      <div id="exec-perf-findings"></div>
+    </div>
+  </div>
+  <div class="exec-recommendation" id="exec-recommendation">Analyzing...</div>
 </div>
 
 <!-- KPI row -->
@@ -182,6 +263,150 @@ const driftHistory = { ks: [], psi: [], kl: [], labels: [] };
 const routeCounts = { production: 0, canary: 0, shadow: 0 };
 let totalRequests = 0;
 
+// ── Executive Summary Engine ──────────────────────────────────────────────────
+
+function finding(color, text) {
+  return `<div class="exec-finding"><div class="dot ${color}"></div><span>${text}</span></div>`;
+}
+
+function updateExecSummary(drift, canary, auditRows) {
+  const issues = [];
+  const modelFindings = [];
+  const driftFindings = [];
+  const perfFindings = [];
+
+  // ── Model health ──────────────────────────────────────────────────────────
+  const prodVer  = canary.production_model || 'v1.2.0';
+  const chalVer  = canary.challenger_model || 'v1.3.0';
+  const cWeight  = Math.round((canary.canary_weight || 0) * 100);
+  const shadowOn = canary.shadow_enabled;
+
+  modelFindings.push(finding('green', `Production model <strong>${prodVer}</strong> is live and serving all primary traffic.`));
+  modelFindings.push(finding(cWeight > 0 ? 'yellow' : 'blue',
+    cWeight > 0
+      ? `Challenger <strong>${chalVer}</strong> is receiving <strong>${cWeight}%</strong> of live traffic via canary split.`
+      : `Challenger <strong>${chalVer}</strong> is in shadow-only mode — no live traffic exposure.`
+  ));
+  modelFindings.push(finding(shadowOn ? 'blue' : 'yellow',
+    shadowOn
+      ? `Shadow testing is <strong>active</strong> — every production request is silently mirrored to the challenger for comparison.`
+      : `Shadow testing is <strong>off</strong> — drift comparison data is not being collected.`
+  ));
+  if (drift.rollback_count > 0) {
+    modelFindings.push(finding('red', `<strong>${drift.rollback_count} auto-rollback${drift.rollback_count > 1 ? 's' : ''}</strong> triggered — challenger was automatically suppressed due to unsafe behavior.`));
+    issues.push('rollback');
+  }
+
+  // ── Drift / data stability ────────────────────────────────────────────────
+  const ks  = drift.ks_statistic || 0;
+  const pv  = drift.ks_pvalue    || 1;
+  const psi = drift.psi_score    || 0;
+  const kl  = drift.kl_divergence || 0;
+  const w   = drift.wasserstein_distance || 0;
+
+  // KS
+  if (ks < 0.1) {
+    driftFindings.push(finding('green', `<strong>Prediction similarity:</strong> The two models agree closely — outputs are nearly identical (KS ${ks.toFixed(3)}).`));
+  } else if (ks < 0.3) {
+    driftFindings.push(finding('yellow', `<strong>Prediction similarity:</strong> Mild disagreement between models — worth monitoring (KS ${ks.toFixed(3)}).`));
+    issues.push('mild-ks');
+  } else {
+    driftFindings.push(finding('red', `<strong>Prediction similarity:</strong> The models are producing substantially different answers — they no longer agree on who is risky (KS ${ks.toFixed(3)}).`));
+    issues.push('high-ks');
+  }
+
+  // PSI
+  if (psi < 0.1) {
+    driftFindings.push(finding('green', `<strong>Risk bucket stability:</strong> The distribution of risk scores is stable — the type of customers being scored hasn't shifted (PSI ${psi.toFixed(3)}).`));
+  } else if (psi < 0.2) {
+    driftFindings.push(finding('yellow', `<strong>Risk bucket stability:</strong> Some shift in customer risk profiles detected — monitor for further movement (PSI ${psi.toFixed(3)}).`));
+  } else {
+    driftFindings.push(finding('red', `<strong>Risk bucket stability:</strong> Significant shift in the customer population — the mix of high-risk vs. low-risk profiles has changed materially (PSI ${psi.toFixed(3)}).`));
+    issues.push('high-psi');
+  }
+
+  // KL + Wasserstein
+  const klColor = kl < 0.5 ? 'green' : kl < 1.5 ? 'yellow' : 'red';
+  driftFindings.push(finding(klColor,
+    kl < 0.5
+      ? `<strong>Information divergence:</strong> Challenger's worldview aligns with production — safe to consider promotion (KL ${kl.toFixed(3)}).`
+      : kl < 1.5
+      ? `<strong>Information divergence:</strong> Challenger's assumptions have drifted from production's learned patterns (KL ${kl.toFixed(3)}).`
+      : `<strong>Information divergence:</strong> Challenger is operating on fundamentally different assumptions than production (KL ${kl.toFixed(3)}).`
+  ));
+
+  // ── Performance ───────────────────────────────────────────────────────────
+  const latencies = (auditRows || []).map(r => r.latency_ms).filter(Boolean).sort((a,b) => a-b);
+  const n = latencies.length;
+
+  if (n >= 5) {
+    const p50 = latencies[Math.floor(n * 0.50)];
+    const p95 = latencies[Math.floor(n * 0.95)];
+    const p99 = latencies[Math.floor(n * 0.99)] || latencies[n-1];
+    const p50Color = p50 < 50 ? 'green' : p50 < 150 ? 'yellow' : 'red';
+    const p95Color = p95 < 150 ? 'green' : p95 < 300 ? 'yellow' : 'red';
+    perfFindings.push(finding(p50Color,
+      `<strong>Typical speed (P50):</strong> Half of all decisions are returned in <strong>${p50.toFixed(0)} ms</strong> — ${p50 < 50 ? 'excellent' : p50 < 150 ? 'acceptable' : 'slow'}.`
+    ));
+    perfFindings.push(finding(p95Color,
+      `<strong>Worst-case speed (P95):</strong> 95% of decisions complete within <strong>${p95.toFixed(0)} ms</strong> — ${p95 < 150 ? 'within SLA' : 'approaching SLA limit'}.`
+    ));
+    const spread = p99 - p50;
+    const spreadColor = spread < 50 ? 'green' : 'yellow';
+    perfFindings.push(finding(spreadColor,
+      spread < 50
+        ? `<strong>Consistency:</strong> Latency is very stable — no outlier spikes detected (P99 only ${spread.toFixed(0)} ms above median).`
+        : `<strong>Consistency:</strong> Some variability in response times — occasional slow requests detected (P99 is ${spread.toFixed(0)} ms above median).`
+    ));
+  } else {
+    perfFindings.push(finding('blue', '<strong>Speed:</strong> Collecting latency data — check back shortly.'));
+  }
+
+  const totalRecs = auditRows ? auditRows.length : 0;
+  const shadowRecs = auditRows ? auditRows.filter(r => r.routed_to === 'shadow').length : 0;
+  if (totalRecs > 0) {
+    perfFindings.push(finding('blue',
+      `<strong>Audit coverage:</strong> <strong>${totalRecs}</strong> decisions logged to the compliance ledger — ${shadowRecs} include silent challenger comparisons.`
+    ));
+  }
+
+  // ── Overall status ────────────────────────────────────────────────────────
+  let overallColor, overallLabel, recommendation;
+
+  if (drift.drift_detected || issues.includes('rollback')) {
+    overallColor = 'red';
+    overallLabel = 'Action Required';
+    recommendation = `<strong>Recommendation:</strong> The challenger model (${chalVer}) has been flagged for unsafe behavior and auto-rollback has been triggered. <strong>Do not promote ${chalVer} to production.</strong> Investigate what changed in the incoming data — a shift in customer risk profiles was detected that the challenger handled differently from production. Review the audit ledger for transactions logged during the drift event, retrain or recalibrate ${chalVer} against the updated data distribution, then restart shadow testing to re-validate before any canary traffic is restored.`;
+  } else if (issues.includes('mild-ks') || issues.includes('high-psi')) {
+    overallColor = 'yellow';
+    overallLabel = 'Monitor Closely';
+    recommendation = `<strong>Recommendation:</strong> Early signs of drift are present but have not yet reached rollback thresholds. Keep canary weight at ${cWeight}% or lower. Increase monitoring frequency and set a 24-hour review checkpoint. If PSI or KS continues rising, consider pausing canary promotion until the root cause is identified.`;
+  } else if (!shadowOn) {
+    overallColor = 'yellow';
+    overallLabel = 'Limited Visibility';
+    recommendation = `<strong>Recommendation:</strong> Shadow testing is currently off. Without it, you have no ongoing comparison between production and the challenger — drift could develop undetected. Re-enable shadow mode to restore continuous monitoring before any canary traffic increase.`;
+  } else {
+    overallColor = 'green';
+    overallLabel = 'Healthy';
+    recommendation = `<strong>Recommendation:</strong> All systems are operating normally. Production model ${prodVer} is stable. The challenger ${chalVer} is behaving consistently with production in shadow mode. If performance continues to hold, consider gradually increasing the canary weight from ${cWeight}% to 25% over the next monitoring window as a next step toward full promotion.`;
+  }
+
+  // Write to DOM
+  document.getElementById('exec-model-findings').innerHTML = modelFindings.join('');
+  document.getElementById('exec-drift-findings').innerHTML = driftFindings.join('');
+  document.getElementById('exec-perf-findings').innerHTML = perfFindings.join('');
+  document.getElementById('exec-recommendation').innerHTML = recommendation;
+
+  const dot = document.getElementById('overall-dot');
+  dot.className = `status-dot ${overallColor}`;
+  document.getElementById('overall-label').textContent = `System Status: ${overallLabel}`;
+  document.getElementById('overall-label').style.color =
+    overallColor === 'red' ? '#f85149' : overallColor === 'yellow' ? '#f0883e' : '#3fb950';
+}
+
+// ── Cache for cross-function data ─────────────────────────────────────────────
+let _lastDrift = {}, _lastCanary = {}, _lastAudit = [];
+
 const driftCtx = document.getElementById('drift-chart').getContext('2d');
 const driftChart = new Chart(driftCtx, {
   type: 'line',
@@ -226,6 +451,7 @@ async function fetchDrift() {
   try {
     const r = await fetch('/dashboard/api/drift');
     const d = await r.json();
+    _lastDrift = d;
     const ks = d.ks_statistic.toFixed(4);
     const psi = d.psi_score.toFixed(4);
     const kl = d.kl_divergence.toFixed(4);
@@ -254,6 +480,7 @@ async function fetchCanary() {
   try {
     const r = await fetch('/dashboard/api/canary');
     const d = await r.json();
+    _lastCanary = d;
     document.getElementById('canary-slider').value = Math.round(d.canary_weight * 100);
     document.getElementById('canary-display').textContent = Math.round(d.canary_weight * 100) + '%';
     document.getElementById('prod-ver').textContent = d.production_model;
@@ -268,6 +495,7 @@ async function fetchAudit() {
   try {
     const r = await fetch('/dashboard/api/audit/recent?limit=20');
     const rows = await r.json();
+    _lastAudit = rows;
     totalRequests = rows.length;
     setKpi('kpi-requests', rows.length, '');
     const tbody = document.getElementById('audit-body');
@@ -313,12 +541,13 @@ async function applyCanary() {
 
 async function tick() {
   await Promise.all([fetchDrift(), fetchAudit()]);
+  updateExecSummary(_lastDrift, _lastCanary, _lastAudit);
 }
 
-fetchCanary();
+fetchCanary().then(() => updateExecSummary(_lastDrift, _lastCanary, _lastAudit));
 tick();
 setInterval(tick, 2000);
-setInterval(fetchCanary, 10000);
+setInterval(() => fetchCanary().then(() => updateExecSummary(_lastDrift, _lastCanary, _lastAudit)), 10000);
 </script>
 </body>
 </html>
